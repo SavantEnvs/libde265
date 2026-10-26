@@ -1,0 +1,9 @@
+project: savantenvs/libde265
+target: nal_fuzzer
+testsuite:
+  - https://$MAYHEM_DOMAIN/$MAYHEM_PROJECT/$MAYHEM_TARGET/testsuite.tar
+  - file://mayhem/nal_fuzzer/testsuite
+cmds:
+  - cmd: /mayhem/nal_fuzzer
+    libfuzzer: true
+    timeout: 10

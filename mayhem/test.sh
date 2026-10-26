@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+#
+# mayhem/test.sh — RUN this repo's OWN functional test suite (already built by mayhem/build.sh).
+# exit 0 = pass. EDIT per repo. PATCH-grade oracle: after an agent patches the source, the grader
+# rebuilds (build.sh) then runs this. DELETE this file if the repo has no meaningful tests.
+#
+# IMPORTANT:
+#  * Must assert BEHAVIOR/OUTPUT, not just exit status. The oracle has to check asserted values /
+#    golden-output diffs / known-answer results — so a PATCH that "fixes" a bug by making the program
+#    exit(0) (or any no-op) FAILS here. Running inputs and checking only "exit 0 / didn't crash" is
+#    NOT a functional test (it's trivially reward-hackable) — use the project's real assertion suite.
+#  * Do NOT build here — mayhem/build.sh already compiled the test suite (with the project's normal
+#    flags). This script only RUNS the pre-built tests and reports counts. If the test runner is
+#    missing, that's a build.sh bug — fail loudly rather than silently rebuilding.
+#  * REQUIRED OUTPUT — a CTRF (https://ctrf.io) summary so Mayhem/the PATCH grader reads the counts:
+#      - writes a CTRF JSON report to ${CTRF_REPORT:-$SRC/ctrf-report.json}, and
+#      - prints a one-line `CTRF {...}` marker to stdout (same JSON, compact).
+#    Only `results.summary` (with tests/passed/failed/pending/skipped/other) is required.
+#    Use the emit_ctrf helper below; it computes tests = passed+failed+skipped and sets the exit
+#    code (0 iff failed==0). Map your framework's output to passed/failed/skipped.
+set -uo pipefail
+[ -n "${SOURCE_DATE_EPOCH:-}" ] || unset SOURCE_DATE_EPOCH
+: "${MAYHEM_JOBS:=$(nproc)}"   # build parallelism; env-overridable, falls back to nproc (use -j"$MAYHEM_JOBS")
+cd "$SRC"
+
+# emit_ctrf <tool> <passed> <failed> [skipped] [pending] [other]
+# Writes a CTRF report (file + stdout `CTRF {...}` marker) and returns non-zero iff failed>0.
+emit_ctrf() {
+  local tool="$1" passed="$2" failed="$3" skipped="${4:-0}" pending="${5:-0}" other="${6:-0}"
+  local tests=$(( passed + failed + skipped + pending + other ))
+  cat > "${CTRF_REPORT:-$SRC/ctrf-report.json}" <<JSON
+{
+  "results": {
+    "tool": { "name": "$tool" },
+    "summary": {
+      "tests": $tests,
+      "passed": $passed,
+      "failed": $failed,
+      "pending": $pending,
+      "skipped": $skipped,
+      "other": $other
+    }
+  }
+}
+JSON
+  printf 'CTRF {"results":{"tool":{"name":"%s"},"summary":{"tests":%d,"passed":%d,"failed":%d,"pending":%d,"skipped":%d,"other":%d}}}\n' \
+    "$tool" "$tests" "$passed" "$failed" "$pending" "$skipped" "$other"
+  [ "$failed" -eq 0 ]
+}
+
+# Known-answer probes through the oracle build of dec265 (dynamically linked, project-normal flags).
+# Golden values were taken from the unmodified decoder on testdata/girlshy.h265 (the upstream test stream):
+# 75 frames of 320x240 4:2:0 8-bit; the md5 of the full raw YUV reconstruction is independent of
+# thread count and of SIMD vs. scalar kernels, so every decode variant must produce the same digest.
+DEC=_build/dec265/dec265
+STREAM=testdata/girlshy.h265
+GOLDEN_MD5=b81538fa33a67278e5263e231e43ca98
+[ -x "$DEC" ] || { echo "missing $DEC (mayhem/build.sh must build it)" >&2; emit_ctrf cmake-dec265-kat 0 1; exit $?; }
+[ -f "$STREAM" ] || { echo "missing $STREAM" >&2; emit_ctrf cmake-dec265-kat 0 1; exit $?; }
+
+passed=0; failed=0
+check() {  # check <name> <expected> <actual>
+  if [ "$2" = "$3" ]; then passed=$((passed+1)); echo "PASS $1"
+  else failed=$((failed+1)); echo "FAIL $1: expected '$2' got '$3'" >&2; fi
+}
+yuv_md5() { "$DEC" -q -o - "$@" "$STREAM" 2>/dev/null | md5sum | cut -d' ' -f1; }
+
+check "yuv md5 (default)"            "$GOLDEN_MD5" "$(yuv_md5)"
+check "yuv md5 (4 threads)"          "$GOLDEN_MD5" "$(yuv_md5 -t 4)"
+check "yuv md5 (no SIMD)"            "$GOLDEN_MD5" "$(yuv_md5 -0)"
+check "yuv md5 (no SIMD, 3 threads)" "$GOLDEN_MD5" "$(yuv_md5 -0 -t 3)"
+check "frame count" "nFrames decoded: 75" "$("$DEC" -q "$STREAM" 2>&1 | sed -n 's/^\(nFrames decoded: [0-9]*\) .*/\1/p')"
+hdr="$("$DEC" -q -d "$STREAM" 2>&1 | grep -E 'pic_(width|height)_in_luma_samples|chroma_format_idc|bit_depth_luma' | sed 's/INFO: //; s/ *: */=/' | sort -u | tr '\n' ' ')"
+check "SPS header dump" "bit_depth_luma=8 chroma_format_idc=1 (4:2:0) pic_height_in_luma_samples=240 pic_width_in_luma_samples=320 " "$hdr"
+
+emit_ctrf cmake-dec265-kat "$passed" "$failed"
